@@ -15,19 +15,8 @@
 
 #include "sfp.h" 
 
-// --- CORES ---
-#define K_RESET  "\x1B[0m"
-#define K_RED    "\x1B[31m"
-#define K_GREEN  "\x1B[32m"
-#define K_YELLOW "\x1B[33m"
-#define K_BLUE   "\x1B[34m"
-#define K_MAGENTA "\x1B[35m"
-#define K_CYAN   "\x1B[36m"
-#define K_WHITE  "\x1B[37m"
-
 #define N_PROCESSOS 5
 #define MAXIMO 20         
-#define TEMPO_FATIA 1
 #define IC_PERIOD_US 500000 
 #define KEY_BASE 1234     
 
@@ -39,11 +28,23 @@ typedef enum {
 
 const char* EstadoStr(Estado e) {
     switch(e) {
-        case PRONTO: return "READY";
-        case EXECUTANDO: return "EXEC";
-        case BLOQUEADO: return "BLOCK";
-        case FINALIZADO: return "EXIT";
+        case PRONTO: return "PRONTO"; 
+        case EXECUTANDO: return "EXECUTANDO";
+        case BLOQUEADO: return "BLOQUEADO";
+        case FINALIZADO: return "FINALIZADO";
         default: return "???";
+    }
+}
+
+// --- NOVO: Função para imprimir nome da syscall ---
+const char* NomeSyscall(int tipo) {
+    switch(tipo) {
+        case REQ_READ: return "READ";
+        case REQ_WRITE: return "WRITE";
+        case REQ_CREATE_DIR: return "CREATE_DIR";
+        case REQ_REM_DIR: return "REM_DIR";
+        case REQ_LIST_DIR: return "LIST_DIR";
+        default: return "UNKNOWN";
     }
 }
 
@@ -121,11 +122,37 @@ int DesenfileirarRespDir(MensagemSFP *msg_dest) {
     return 1;
 }
 
-// SETUP REDE
+// ============================================================================
+// SETUP REDE 
+// ============================================================================
 void SetupRede() {
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) { perror("Socket"); exit(1); }
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) { 
+        perror("Socket creation failed"); 
+        exit(1); 
+    }
+
+    int opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in me;
+    memset(&me, 0, sizeof(me));
+    me.sin_family = AF_INET;
+    me.sin_port = htons(0); 
+    me.sin_addr.s_addr = htonl(INADDR_ANY); 
+
+    if (bind(sockfd, (struct sockaddr*)&me, sizeof(me)) < 0) {
+        perror("Bind falhou");
+        exit(1);
+    }
+
+    socklen_t len = sizeof(me);
+    if (getsockname(sockfd, (struct sockaddr *)&me, &len) == 0) {
+        printf(">>> [REDE] Kernel escutando na porta UDP %d\n", ntohs(me.sin_port));
+    }
+
     int flags = fcntl(sockfd, F_GETFL, 0);
     fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+    
     memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_port = htons(PORTA_SERVIDOR); 
@@ -136,7 +163,6 @@ void IniciarProcesso(int idx) {
     if (idx < 0 || idx >= N_PROCESSOS) return;
     Processo *proc = &processos[idx];
     if (proc->estado != PRONTO) return;
-    printf(K_GREEN ">>> [SCHED] Dispatch A%d (PID %d)" K_RESET "\n", idx+1, proc->pid);
     kill(proc->pid, SIGCONT);
     proc->estado = EXECUTANDO;
     idx_executando = idx;
@@ -146,7 +172,6 @@ void PararExecutando() {
     if (idx_executando >= 0) {
         Processo *proc = &processos[idx_executando];
         if (proc->estado == EXECUTANDO) {
-            printf(K_YELLOW ">>> [SCHED] Preempt A%d" K_RESET "\n", idx_executando+1);
             kill(proc->pid, SIGSTOP);
             proc->estado = PRONTO;
             EnfileirarReady(idx_executando);
@@ -163,97 +188,106 @@ void HandlerSyscall(int sig) { (void)sig; flag_syscall = 1; }
 void HandlerCtrlC(int sig) { (void)sig; flag_ctrlc = 1; }
 void HandlerFilhoTerminado(int sig) { (void)sig; flag_filho_terminou = 1; }
 
-// ============================================================================
-// APLICAÇÃO (FILHO)
-// ============================================================================
+void ImprimirEstado() {
+    printf("\n******* Estado Atual *******\n");
+    for (int i = 0; i < N_PROCESSOS; i++) {
+        Processo *p = &processos[i];
+        if (p->estado == BLOQUEADO) {
+            char op = '?';
+            int dev = 0;
+            int tipo_req = p->shm_addr->read_req.tipo; 
+            
+            if (tipo_req == REQ_READ) { op = 'R'; dev = 1; }
+            else if (tipo_req == REQ_WRITE) { op = 'W'; dev = 1; }
+            else if (tipo_req == REQ_CREATE_DIR) { op = 'C'; dev = 2; }
+            else if (tipo_req == REQ_REM_DIR) { op = 'D'; dev = 2; }
+            else if (tipo_req == REQ_LIST_DIR) { op = 'L'; dev = 2; }
+
+            printf("A%d(pid=%d): PC=%d - ESTADO=%s - (espera D%d op=%c)\n",
+                   i + 1, p->pid, p->pc, EstadoStr(p->estado), dev, op);
+        } else {
+            printf("A%d(pid=%d): PC=%d - ESTADO=%s\n",
+                   i + 1, p->pid, p->pc, EstadoStr(p->estado));
+        }
+    }
+    printf("Filas (Respostas): Arq=%d Dir=%d\n", len_fa, len_fd);
+    printf("******************************\n\n");
+}
+
 void ExecutarAplicacao(int id_processo) { 
     int shmid = shmget(KEY_BASE + id_processo, sizeof(MensagemSFP), 0666);
     if (shmid < 0) { perror("App shmget"); exit(1); }
-    
     MensagemSFP *shm = (MensagemSFP *)shmat(shmid, NULL, 0);
-    
     srand(time(NULL) ^ (getpid() << 8));
+    
     int pc = 0;
     int owner_id = id_processo + 1; 
     char my_home[20];
     sprintf(my_home, "/A%d", owner_id);
+    int offsets_possiveis[] = {0, 16, 32, 48, 64, 80, 96};
 
     printf("   [APP A%d] Iniciado (PID %d). Home: %s\n", owner_id, getpid(), my_home);
 
     while (pc < MAXIMO) {
         usleep(500000); 
-
-        if ((rand() % 100) < 20) {
-            int tipo_op = rand() % 5; 
+        int d = rand();
+        if ((d % 100) < 15) { 
             memset(shm, 0, sizeof(MensagemSFP));
-            shm->read_req.owner = owner_id; 
+            int offset_escolhido = offsets_possiveis[rand() % 7];
 
-            if (tipo_op == 0) { 
-                shm->read_req.tipo = REQ_READ;
-                sprintf(shm->read_req.path, "%s/dados.txt", my_home);
-                shm->read_req.len_path = strlen(shm->read_req.path);
-                shm->read_req.offset = (rand() % 4) * 16;
-                printf(K_CYAN "   [A%d] SYSCALL READ %s off=%d" K_RESET "\n", owner_id, shm->read_req.path, shm->read_req.offset);
-            } 
-            else if (tipo_op == 1) { 
-                shm->write_req.tipo = REQ_WRITE;
-                sprintf(shm->write_req.path, "%s/dados.txt", my_home);
-                shm->write_req.len_path = strlen(shm->write_req.path);
-                shm->write_req.offset = (rand() % 4) * 16;
-                sprintf(shm->write_req.payload, "D-A%d-%02d", owner_id, rand()%99);
-                printf(K_CYAN "   [A%d] SYSCALL WRITE %s" K_RESET "\n", owner_id, shm->write_req.path);
+            if (d % 2 != 0) { // Arquivo
+                if ((rand() % 2) == 0) { 
+                    shm->read_req.tipo = REQ_READ;
+                    shm->read_req.owner = owner_id; 
+                    sprintf(shm->read_req.path, "%s/dados.txt", my_home);
+                    shm->read_req.len_path = strlen(shm->read_req.path);
+                    shm->read_req.offset = offset_escolhido;
+                } else { 
+                    shm->write_req.tipo = REQ_WRITE;
+                    shm->write_req.owner = owner_id; 
+                    sprintf(shm->write_req.path, "%s/dados.txt", my_home);
+                    shm->write_req.len_path = strlen(shm->write_req.path);
+                    shm->write_req.offset = offset_escolhido;
+                    sprintf(shm->write_req.payload, "D-A%d-PC%02d", owner_id, pc);
+                }
+            } else { // Diretório
+                int sub_op = rand() % 3;
+                if (sub_op == 0) { 
+                    shm->create_dir_req.tipo = REQ_CREATE_DIR;
+                    shm->create_dir_req.owner = owner_id; 
+                    strcpy(shm->create_dir_req.path, my_home);
+                    sprintf(shm->create_dir_req.dirname, "sub_%d", rand()%50);
+                    shm->create_dir_req.len_dirname = strlen(shm->create_dir_req.dirname);
+                } else if (sub_op == 1) { 
+                    shm->rem_dir_req.tipo = REQ_REM_DIR;
+                    shm->rem_dir_req.owner = owner_id; 
+                    strcpy(shm->rem_dir_req.path, my_home);
+                    sprintf(shm->rem_dir_req.dirname, "sub_%d", rand()%50);
+                    shm->rem_dir_req.len_dirname = strlen(shm->rem_dir_req.dirname);
+                } else { 
+                    shm->list_dir_req.tipo = REQ_LIST_DIR;
+                    shm->list_dir_req.owner = owner_id; 
+                    strcpy(shm->list_dir_req.path, my_home);
+                }
             }
-            else if (tipo_op == 2) { 
-                shm->create_dir_req.tipo = REQ_CREATE_DIR;
-                strcpy(shm->create_dir_req.path, my_home);
-                sprintf(shm->create_dir_req.dirname, "sub_%d", rand()%100);
-                shm->create_dir_req.len_dirname = strlen(shm->create_dir_req.dirname);
-                printf(K_CYAN "   [A%d] SYSCALL MKDIR %s/%s" K_RESET "\n", owner_id, my_home, shm->create_dir_req.dirname);
-            }
-            else if (tipo_op == 3) { 
-                shm->rem_dir_req.tipo = REQ_REM_DIR;
-                strcpy(shm->rem_dir_req.path, my_home);
-                sprintf(shm->rem_dir_req.dirname, "sub_%d", rand()%100);
-                shm->rem_dir_req.len_dirname = strlen(shm->rem_dir_req.dirname);
-                printf(K_CYAN "   [A%d] SYSCALL RMDIR %s/%s" K_RESET "\n", owner_id, my_home, shm->rem_dir_req.dirname);
-            }
-            else { 
-                shm->list_dir_req.tipo = REQ_LIST_DIR;
-                strcpy(shm->list_dir_req.path, my_home);
-                printf(K_CYAN "   [A%d] SYSCALL LIST %s" K_RESET "\n", owner_id, my_home);
-            }
-
             kill(getppid(), SIG_SYSCALL);
             pause(); 
-            
-            // Verificação de Erro/Sucesso
-            int status = 0; 
-            if (shm->tipo == REP_READ || shm->tipo == REP_WRITE) {
-                if (shm->read_rep.offset < 0) status = -1;
-            } else if (shm->tipo == REP_CREATE_DIR || shm->tipo == REP_REM_DIR) {
-                if (shm->create_dir_rep.len_path < 0) status = -1;
-            } else if (shm->tipo == REP_LIST_DIR) {
-                if (shm->list_dir_rep.nrnames < 0) status = -1;
-            }
-
-            if (status == 0) printf(K_GREEN "   [A%d] Retornou: SUCESSO" K_RESET "\n", owner_id);
-            else printf(K_RED "   [A%d] Retornou: ERRO (Cod negativo)" K_RESET "\n", owner_id);
         }
+        usleep(500000); 
         pc++;
     }
     shmdt(shm);
     exit(0);
 }
 
-// INTERCONTROLLER
 void CriarInterController(pid_t pid_kernel) {
     if (fork() == 0) {
         srand(time(NULL));
         while(1) {
             usleep(IC_PERIOD_US); 
             kill(pid_kernel, SIGALRM);
-            if ((rand() % 100) < 10) kill(pid_kernel, SIGUSR1);
-            if ((rand() % 100) < 2) kill(pid_kernel, SIGUSR2);
+            if ((rand() % 100) < 40) kill(pid_kernel, SIGUSR1);
+            if ((rand() % 100) < 20) kill(pid_kernel, SIGUSR2);
         }
         exit(0);
     }
@@ -279,7 +313,7 @@ int main() {
     sa.sa_handler = HandlerCtrlC; sigaction(SIGINT, &sa, NULL);
     sa.sa_handler = HandlerFilhoTerminado; sigaction(SIGCHLD, &sa, NULL);
 
-    printf(K_WHITE ">>> KERNEL: Criando %d processos..." K_RESET "\n", N_PROCESSOS);
+    printf(">>> KERNEL: Criando %d processos...\n", N_PROCESSOS);
     for(int i=0; i<N_PROCESSOS; i++) {
         int shmid = shmget(KEY_BASE + i, sizeof(MensagemSFP), IPC_CREAT | 0666);
         if (shmid < 0) { perror("shmget"); exit(1); }
@@ -303,43 +337,47 @@ int main() {
     }
 
     CriarInterController(pid_kernel);
-    printf(">>> KERNEL STARTADO (V3.1 - Logs Ativados).\n");
+    printf(">>> KERNEL STARTADO (V5.2 - Syscall Name Print).\n");
 
     int p = DesenfileirarReady();
     if (p >= 0) IniciarProcesso(p);
+
+    ImprimirEstado();
 
     while(1) {
         pause(); 
 
         MensagemSFP msg_rede;
-        while (recvfrom(sockfd, &msg_rede, sizeof(msg_rede), 0, NULL, NULL) > 0) {
+        ssize_t bytes_rec;
+        while ((bytes_rec = recvfrom(sockfd, &msg_rede, sizeof(msg_rede), 0, NULL, NULL)) > 0) {
             int eh_arquivo = (msg_rede.tipo == REP_READ || msg_rede.tipo == REP_WRITE);
-            
-            // LOG REATIVADO: Para debug
             int owner = msg_rede.read_rep.owner;
+            printf(">>> [REDE] Resposta recebida! Bytes: %ld | Tipo: %d | Owner: A%d\n", bytes_rec, msg_rede.tipo, owner);
+
             if (eh_arquivo) {
                 EnfileirarRespArquivo(msg_rede);
-                printf(K_MAGENTA "[NET] <<< Recebido SFSS (Arq) para A%d. Pendentes=%d" K_RESET "\n", owner, len_fa);
             } else {
                 EnfileirarRespDir(msg_rede);
-                printf(K_MAGENTA "[NET] <<< Recebido SFSS (Dir) para A%d. Pendentes=%d" K_RESET "\n", owner, len_fd);
             }
         }
-
+        
         if (flag_syscall) {
             sigprocmask(SIG_BLOCK, &mask_timer, NULL);
             flag_syscall = 0;
             if (idx_executando >= 0) {
                 Processo *proc = &processos[idx_executando];
-                printf(K_BLUE "[KERNEL] Syscall A%d -> Send SFSS..." K_RESET "\n", idx_executando+1);
+                
+                // --- CORREÇÃO: Print com nome da syscall ---
+                printf("[KERNEL] A%d fez syscall (%s). Enviando REQ ao SFSS...\n", 
+                       idx_executando+1, NomeSyscall(proc->shm_addr->tipo));
 
                 if (sendto(sockfd, proc->shm_addr, sizeof(MensagemSFP), 0, 
                            (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
-                    perror("Kernel sendto");
+                    perror("Kernel sendto error");
                 } 
 
                 proc->estado = BLOQUEADO;
-                printf(K_RED "[KERNEL] Bloqueando A%d (Aguardando I/O)" K_RESET "\n", idx_executando+1);
+                printf("[KERNEL] A%d BLOQUEADO (aguardando I/O)\n", idx_executando+1);
                 kill(proc->pid, SIGSTOP); 
                 
                 if (proc->shm_addr->tipo == REQ_READ || proc->shm_addr->tipo == REQ_WRITE)
@@ -361,16 +399,11 @@ int main() {
             if (len_fa > 0) {
                 DesenfileirarRespArquivo(&resposta);
                 int id_dono = resposta.read_rep.owner - 1; 
-                
-                printf(K_YELLOW "[IRQ1] Interrupção de Disco! Verificando A%d..." K_RESET "\n", id_dono+1);
-                
                 if (id_dono >= 0 && id_dono < N_PROCESSOS && processos[id_dono].estado == BLOQUEADO) {
                      memcpy(processos[id_dono].shm_addr, &resposta, sizeof(MensagemSFP));
                      processos[id_dono].estado = PRONTO;
                      EnfileirarReady(id_dono);
-                     printf(K_GREEN "[KERNEL] A%d Desbloqueado -> Ready Queue" K_RESET "\n", id_dono+1);
-                } else {
-                     printf(K_RED "[KERNEL] ERRO/IGNORE: A%d não estava BLOQUEADO." K_RESET "\n", id_dono+1);
+                     printf("[IRQ1-ARQ] A%d DESBLOQUEADO!\n", id_dono+1);
                 }
             }
             sigprocmask(SIG_UNBLOCK, &mask_timer, NULL);
@@ -383,16 +416,11 @@ int main() {
             if (len_fd > 0) {
                 DesenfileirarRespDir(&resposta);
                 int id_dono = resposta.create_dir_rep.owner - 1; 
-                
-                printf(K_YELLOW "[IRQ2] Interrupção de Dir! Verificando A%d..." K_RESET "\n", id_dono+1);
-
                 if (id_dono >= 0 && id_dono < N_PROCESSOS && processos[id_dono].estado == BLOQUEADO) {
                     memcpy(processos[id_dono].shm_addr, &resposta, sizeof(MensagemSFP));
                     processos[id_dono].estado = PRONTO;
                     EnfileirarReady(id_dono);
-                    printf(K_GREEN "[KERNEL] A%d Desbloqueado -> Ready Queue" K_RESET "\n", id_dono+1);
-                } else {
-                     printf(K_RED "[KERNEL] ERRO/IGNORE: A%d não estava BLOQUEADO." K_RESET "\n", id_dono+1);
+                    printf("[IRQ2-DIR] A%d DESBLOQUEADO!\n", id_dono+1);
                 }
             }
             sigprocmask(SIG_UNBLOCK, &mask_timer, NULL);
@@ -402,7 +430,16 @@ int main() {
             flag_irq0 = 0;
             if (idx_executando >= 0 && processos[idx_executando].estado == EXECUTANDO) {
                 processos[idx_executando].pc++;
-                PararExecutando(); 
+                printf(">>> [CPU] A%d PC=%d\n", idx_executando + 1, processos[idx_executando].pc);
+
+                if (processos[idx_executando].pc >= MAXIMO) {
+                    processos[idx_executando].estado = FINALIZADO;
+                    printf(">>> [KERNEL] A%d FINALIZADO.\n", idx_executando + 1);
+                    kill(processos[idx_executando].pid, SIGKILL); 
+                    idx_executando = -1; 
+                } else {
+                    PararExecutando(); 
+                }
             }
             int prox = DesenfileirarReady();
             if (prox >= 0) IniciarProcesso(prox);
@@ -410,18 +447,27 @@ int main() {
 
         if (flag_ctrlc) {
             flag_ctrlc = 0;
-            printf("\n--- STATUS KERNEL (FINALIZANDO) ---\n");
-            for(int i=0; i<N_PROCESSOS; i++) {
-                printf("A%d: PC=%d Estado=%s\n", i+1, processos[i].pc, EstadoStr(processos[i].estado));
-                shmctl(processos[i].shmid, IPC_RMID, NULL);
-                kill(processos[i].pid, SIGKILL);
-            }
-            exit(0);
+            ImprimirEstado();
         }
 
         if (flag_filho_terminou) {
             flag_filho_terminou = 0;
             while(waitpid(-1, NULL, WNOHANG) > 0);
         }
+
+        int contagem_finalizados = 0;
+        for (int i = 0; i < N_PROCESSOS; i++) {
+            if (processos[i].estado == FINALIZADO) {
+                contagem_finalizados++;
+            }
+        }
+
+        if (contagem_finalizados == N_PROCESSOS) {
+            printf("\n******* FIM DA SIMULAÇÃO (Todos os processos terminaram) *******\n");
+            for(int i=0; i<N_PROCESSOS; i++) shmctl(processos[i].shmid, IPC_RMID, NULL);
+            system("pkill -P $(ps -o pid= --ppid $$) >/dev/null 2>&1");
+            exit(0);
+        }
     }
+    return 0;
 }
