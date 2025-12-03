@@ -9,134 +9,129 @@
 #include <dirent.h>
 #include <errno.h>
 
-#include "sfp.h" // Nosso contrato
+#include "sfp.h" 
 
 #define ROOT_DIR "SFSS-root-dir"
 
-// Função auxiliar para montar o caminho real no disco
-// Ex: Recebe "/A1/teste.txt" -> Transforma em "SFSS-root-dir/A1/teste.txt"
-void ConstruirCaminho(char *buffer, const char *caminho_req) {
-    snprintf(buffer, sizeof(buffer), "%s%s", ROOT_DIR, caminho_req);
+// Função auxiliar para montar o caminho do arquivo
+void ConstruirCaminho(char *buffer, size_t tam, const char *caminho_req) {
+    snprintf(buffer, tam, "%s%s", ROOT_DIR, caminho_req);
 }
 
 // ---------------------------------------------------------------------------
 // 1. TRATAR LEITURA (READ)
 // ---------------------------------------------------------------------------
 void TratarRead(MensagemSFP *msg) {
+    int req_owner = msg->read_req.owner;
+    int req_offset = msg->read_req.offset;
+    char req_path[MAX_PATH];
+    strcpy(req_path, msg->read_req.path); 
+
+    msg->read_rep.tipo = REP_READ;
+    msg->read_rep.owner = req_owner;
+
     char caminho_real[MAX_PATH + 20];
-    ConstruirCaminho(caminho_real, msg->read_req.path);
+    ConstruirCaminho(caminho_real, sizeof(caminho_real), req_path);
 
     FILE *f = fopen(caminho_real, "rb");
     if (!f) {
-        // Erro: Arquivo não existe ou sem permissão
-        printf("SFSS: Erro ao abrir leitura '%s': %s\n", caminho_real, strerror(errno));
-        msg->read_rep.tipo = REP_READ;
-        msg->read_rep.offset = -1; // Código de erro conforme PDF
-        return; // Retorna com erro
+        printf("SFSS: Erro leitura '%s': %s\n", caminho_real, strerror(errno));
+        msg->read_rep.offset = -1; // Erro: Arquivo não existe
+        return; 
     }
 
-    // Tenta ir para o offset
-    if (fseek(f, msg->read_req.offset, SEEK_SET) != 0) {
+    if (fseek(f, req_offset, SEEK_SET) != 0) {
         printf("SFSS: Erro seek '%s': %s\n", caminho_real, strerror(errno));
-        msg->read_rep.tipo = REP_READ;
-        msg->read_rep.offset = -2; // Erro de seek (fora do arquivo?)
+        msg->read_rep.offset = -2; // Erro: Offset inválido
         fclose(f);
         return;
     }
 
-    // Lê os 16 bytes (TAM_BLOCO)
-    memset(msg->read_rep.payload, 0, TAM_BLOCO); // Limpa buffer
+    memset(msg->read_rep.payload, 0, TAM_BLOCO);
     size_t lidos = fread(msg->read_rep.payload, 1, TAM_BLOCO, f);
-
     fclose(f);
 
-    // Prepara resposta
-    msg->read_rep.tipo = REP_READ;
-    // O PDF diz: "na ausência de erros, offset tem valor igual ao requisitado"
-    // Se leu 0 bytes (EOF), ainda não é necessariamente erro de protocolo, mas
-    // se o cliente pediu além do fim, lidos será 0.
-    if (lidos == 0 && msg->read_req.offset > 0) {
-         // Talvez indicar EOF? Mas o PDF pede offset negativo se erro.
-         // Vamos manter o offset original se conseguiu ler 0 (fim de arquivo) ou >0.
-    }
-    msg->read_rep.offset = msg->read_req.offset;
-    
-    printf("SFSS: Read OK em '%s' (Off=%d, Lidos=%ld)\n", msg->read_req.path, msg->read_req.offset, lidos);
+    msg->read_rep.offset = req_offset; 
+    printf("SFSS: Read OK (A%d) '%s' Off=%d\n", req_owner, req_path, req_offset);
 }
 
 // ---------------------------------------------------------------------------
 // 2. TRATAR ESCRITA (WRITE)
 // ---------------------------------------------------------------------------
 void TratarWrite(MensagemSFP *msg) {
-    char caminho_real[MAX_PATH + 20];
-    ConstruirCaminho(caminho_real, msg->write_req.path);
+    int req_owner = msg->write_req.owner;
+    int req_offset = msg->write_req.offset;
+    char req_path[MAX_PATH];
+    char req_payload[TAM_BLOCO];
+    strcpy(req_path, msg->write_req.path);
+    memcpy(req_payload, msg->write_req.payload, TAM_BLOCO);
 
-    // Verifica se arquivo existe para saber o modo de abertura
-    FILE *f = fopen(caminho_real, "r+b"); // Leitura/Escrita Binária
+    msg->write_rep.tipo = REP_WRITE;
+    msg->write_rep.owner = req_owner;
+
+    char caminho_real[MAX_PATH + 20];
+    ConstruirCaminho(caminho_real, sizeof(caminho_real), req_path);
+
+    FILE *f = fopen(caminho_real, "r+b"); 
     if (!f) {
-        // Se não existe, cria (w+b)
         f = fopen(caminho_real, "w+b");
         if (!f) {
-            printf("SFSS: Erro ao criar/abrir escrita '%s': %s\n", caminho_real, strerror(errno));
-            msg->write_rep.tipo = REP_WRITE;
+            printf("SFSS: Erro escrita '%s': %s\n", caminho_real, strerror(errno));
             msg->write_rep.offset = -1; 
             return;
         }
     }
 
-    // Lógica de "Gaps" (PDF Obs1): Se offset > tamanho atual, preencher com espaços (0x20)
     fseek(f, 0, SEEK_END);
     long tamanho_atual = ftell(f);
 
-    if (msg->write_req.offset > tamanho_atual) {
-        // Preencher o buraco com espaços
+    if (req_offset > tamanho_atual) {
         fseek(f, tamanho_atual, SEEK_SET);
-        long buraco = msg->write_req.offset - tamanho_atual;
+        long buraco = req_offset - tamanho_atual;
         char *espacos = malloc(buraco);
-        memset(espacos, 0x20, buraco); // 0x20 = espaço
-        fwrite(espacos, 1, buraco, f);
-        free(espacos);
+        if (espacos) {
+            memset(espacos, 0x20, buraco); 
+            fwrite(espacos, 1, buraco, f);
+            free(espacos);
+        }
     }
 
-    // Posiciona e escreve o Payload
-    fseek(f, msg->write_req.offset, SEEK_SET);
-    fwrite(msg->write_req.payload, 1, TAM_BLOCO, f);
+    fseek(f, req_offset, SEEK_SET);
+    fwrite(req_payload, 1, TAM_BLOCO, f);
     fclose(f);
 
-    printf("SFSS: Write OK em '%s' (Off=%d)\n", msg->write_req.path, msg->write_req.offset);
-
-    // Prepara resposta
-    msg->write_rep.tipo = REP_WRITE;
-    msg->write_rep.offset = msg->write_req.offset; // Sucesso
+    printf("SFSS: Write OK (A%d) '%s'\n", req_owner, req_path);
+    msg->write_rep.offset = req_offset; 
 }
 
 // ---------------------------------------------------------------------------
 // 3. TRATAR CRIAR DIRETÓRIO (DC)
 // ---------------------------------------------------------------------------
 void TratarCreateDir(MensagemSFP *msg) {
+    int req_owner = msg->create_dir_req.owner;
+    char req_path[MAX_PATH];
+    char req_dirname[MAX_PATH];
+    strcpy(req_path, msg->create_dir_req.path);
+    strcpy(req_dirname, msg->create_dir_req.dirname);
+
+    msg->create_dir_rep.tipo = REP_CREATE_DIR;
+    msg->create_dir_rep.owner = req_owner;
+
     char caminho_real[MAX_PATH * 2];
     char caminho_novo[MAX_PATH * 2];
 
-    ConstruirCaminho(caminho_real, msg->create_dir_req.path);
-    
-    // Monta o path completo do novo diretório
-    snprintf(caminho_novo, sizeof(caminho_novo),"%s/%s", caminho_real, msg->create_dir_req.dirname);
+    ConstruirCaminho(caminho_real, sizeof(caminho_real), req_path);
+    snprintf(caminho_novo, sizeof(caminho_novo),"%s/%s", caminho_real, req_dirname);
 
-    printf("SFSS: Criando Dir '%s'\n", caminho_novo);
+    printf("SFSS: Mkdir (A%d) '%s'\n", req_owner, caminho_novo);
 
-    // Permissões 0700 (rwx------)
-    if (mkdir(caminho_novo, 0700) == 0) {
-        // Sucesso
-        msg->create_dir_rep.tipo = REP_CREATE_DIR;
-        
-        // Retorna o novo path concatenado (conforme PDF)
-        snprintf(msg->create_dir_rep.path,sizeof(msg->create_dir_rep.path),"%s/%s",msg->create_dir_req.path, msg->create_dir_req.dirname);
+    if (mkdir(caminho_novo, 0700) == 0 || errno == EEXIST) {
+        snprintf(msg->create_dir_rep.path, sizeof(msg->create_dir_rep.path), 
+                 "%s/%s", req_path, req_dirname);
         msg->create_dir_rep.len_path = strlen(msg->create_dir_rep.path);
     } else {
-        // Erro
         perror("SFSS mkdir error");
-        msg->create_dir_rep.tipo = REP_CREATE_DIR;
-        msg->create_dir_rep.len_path = -1; // Código de erro
+        msg->create_dir_rep.len_path = -1; 
     }
 }
 
@@ -144,23 +139,30 @@ void TratarCreateDir(MensagemSFP *msg) {
 // 4. TRATAR REMOVER (DR)
 // ---------------------------------------------------------------------------
 void TratarRemoveDir(MensagemSFP *msg) {
+    int req_owner = msg->rem_dir_req.owner;
+    char req_path[MAX_PATH];
+    char req_dirname[MAX_PATH];
+    strcpy(req_path, msg->rem_dir_req.path);
+    strcpy(req_dirname, msg->rem_dir_req.dirname);
+
+    msg->rem_dir_rep.tipo = REP_REM_DIR;
+    msg->rem_dir_rep.owner = req_owner;
+
     char caminho_real[MAX_PATH * 2];
-    ConstruirCaminho(caminho_real, msg->rem_dir_req.path);
+    ConstruirCaminho(caminho_real, sizeof(caminho_real), req_path);
 
     char alvo[MAX_PATH * 2];
-    snprintf(alvo, sizeof(alvo), "%s/%s", caminho_real, msg->rem_dir_req.dirname);
+    snprintf(alvo, sizeof(alvo), "%s/%s", caminho_real, req_dirname);
 
-    printf("SFSS: Removendo '%s'\n", alvo);
+    printf("SFSS: Rmdir (A%d) '%s'\n", req_owner, alvo);
 
-    // remove() do C apaga arquivos e diretórios (se vazios)
     if (remove(alvo) == 0) {
-        msg->rem_dir_rep.tipo = REP_REM_DIR;
-        // Retorna o path "pai" limpo
-        strcpy(msg->rem_dir_rep.path, msg->rem_dir_req.path);
+        strcpy(msg->rem_dir_rep.path, req_path);
         msg->rem_dir_rep.len_path = strlen(msg->rem_dir_rep.path);
     } else {
-        perror("SFSS remove error");
-        msg->rem_dir_rep.tipo = REP_REM_DIR;
+        // Se falhar (ex: diretorio nao vazio ou nao existe), retorna erro
+        // Mas não vamos travar o servidor, apenas notificar.
+        // perror("SFSS remove error"); 
         msg->rem_dir_rep.len_path = -1;
     }
 }
@@ -169,54 +171,52 @@ void TratarRemoveDir(MensagemSFP *msg) {
 // 5. TRATAR LISTAR DIRETÓRIO (DL)
 // ---------------------------------------------------------------------------
 void TratarListDir(MensagemSFP *msg) {
+    int req_owner = msg->list_dir_req.owner;
+    char req_path[MAX_PATH];
+    strcpy(req_path, msg->list_dir_req.path);
+
+    msg->list_dir_rep.tipo = REP_LIST_DIR;
+    msg->list_dir_rep.owner = req_owner;
+
     char caminho_real[MAX_PATH + 20];
-    ConstruirCaminho(caminho_real, msg->list_dir_req.path);
+    ConstruirCaminho(caminho_real, sizeof(caminho_real), req_path);
 
     DIR *d;
     struct dirent *dir;
     d = opendir(caminho_real);
 
-    msg->list_dir_rep.tipo = REP_LIST_DIR;
     msg->list_dir_rep.nrnames = 0;
-    msg->list_dir_rep.allfilenames[0] = '\0'; // Inicia string vazia
 
     if (d) {
         int char_count = 0;
         int idx = 0;
 
         while ((dir = readdir(d)) != NULL && idx < MAX_DIR_ENTRIES) {
-            // Ignora "." e ".." para limpar a saída (opcional, mas bom)
             if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0)
                 continue;
 
             int len_nome = strlen(dir->d_name);
-
-            // Verifica se cabe no buffer allfilenames
             if (char_count + len_nome + 1 >= TAM_LIST_BUFFER) break;
 
-            // Copia nome para o bufferzão
-            strcat(msg->list_dir_rep.allfilenames, dir->d_name);
+            strcpy(&msg->list_dir_rep.allfilenames[char_count], dir->d_name);
             
-            // Preenche a struct de posições
             msg->list_dir_rep.fstlstpositions[idx].inicio = char_count;
             msg->list_dir_rep.fstlstpositions[idx].fim = char_count + len_nome;
             
-            // Tenta adivinhar se é arquivo ou diretório
-            // (DT_DIR nem sempre funciona em todos sistemas de arquivos, mas no linux lab costuma funcionar)
             if (dir->d_type == DT_DIR) 
                 msg->list_dir_rep.fstlstpositions[idx].eh_arquivo = 0;
             else 
                 msg->list_dir_rep.fstlstpositions[idx].eh_arquivo = 1;
 
-            char_count += len_nome;
+            char_count += len_nome + 1; 
             idx++;
         }
         msg->list_dir_rep.nrnames = idx;
         closedir(d);
-        printf("SFSS: ListDir OK em '%s' -> %d itens encontrados\n", msg->list_dir_req.path, idx);
+        printf("SFSS: ListDir OK (A%d) '%s' -> %d itens\n", req_owner, req_path, idx);
     } else {
-        printf("SFSS: Erro opendir '%s': %s\n", caminho_real, strerror(errno));
-        msg->list_dir_rep.nrnames = -1; // Erro
+        // Se erro ao abrir dir, retorna código negativo
+        msg->list_dir_rep.nrnames = -1; 
     }
 }
 
@@ -228,80 +228,73 @@ int main() {
     struct sockaddr_in servaddr, cliaddr;
     MensagemSFP msg_buffer;
     
-    // 1. Cria socket UDP
+    // Cria Socket
     if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    memset(&servaddr, 0, sizeof(servaddr));
-    memset(&cliaddr, 0, sizeof(cliaddr));
+    // --- CORREÇÃO: Permite reuso rápido da porta ---
+    int opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // 2. Configura Endereço do Servidor
+    // Configura Endereço do Servidor
+    memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(PORTA_SERVIDOR);
+    servaddr.sin_port = htons(PORTA_SERVIDOR); 
 
-    // 3. Bind
+    // Bind
     if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("Bind failed");
         exit(EXIT_FAILURE);
     }
 
-    // 4. Cria diretório raiz se não existir
-    struct stat st = {0};
-    if (stat(ROOT_DIR, &st) == -1) {
-        if(mkdir(ROOT_DIR, 0700) == 0){
-            printf(">>> Diretório raiz '%s' criado com sucesso.\n", ROOT_DIR);
-        } else {
-            perror(">>> Erro ao criar diretório raiz");
-            exit(EXIT_FAILURE);
-        }
+    // Cria diretórios iniciais se não existirem
+    if (mkdir(ROOT_DIR, 0700) == 0) {
+        printf(">>> Diretório raiz criado.\n");
     }
 
-    printf(">>> SFSS rodando na porta %d...\n", PORTA_SERVIDOR);
-    printf(">>> Aguardando requisições...\n");
+    char home_path[MAX_PATH];
+    for (int i = 0; i <= 5; i++) {
+        snprintf(home_path, sizeof(home_path), "%s/A%d", ROOT_DIR, i);
+        mkdir(home_path, 0700);
+    }
+
+    printf(">>> SFSS rodando na porta %d (Fix: SO_REUSEADDR + No WaitAll)\n", PORTA_SERVIDOR);
 
     while (1) {
         socklen_t len = sizeof(cliaddr);
         
-        // 5. Recebe Mensagem (Bloqueante)
+        // --- FIX CRÍTICO: Removido MSG_WAITALL (use 0) ---
+        // Isso impede que o servidor fique esperando encher o buffer se o pacote fragmentar
         ssize_t n = recvfrom(sockfd, &msg_buffer, sizeof(MensagemSFP), 
-                             MSG_WAITALL, (struct sockaddr *)&cliaddr, &len);
+                             0, (struct sockaddr *)&cliaddr, &len);
         
         if (n < 0) {
-            perror("recvfrom error");
+            // Ignora erros temporários
+            if (errno != EAGAIN && errno != EWOULDBLOCK) perror("SFSS recv error");
             continue;
         }
 
-        // 6. Processa a Mensagem (Dispatch)
-        // O tipo está no início da Union, então podemos acessar msg_buffer.tipo
-        // ou msg_buffer.read_req.tipo (são o mesmo espaço de memória)
+        // Processa a mensagem
         switch (msg_buffer.tipo) {
-            case REQ_READ:
-                TratarRead(&msg_buffer);
+            case REQ_READ:       TratarRead(&msg_buffer); break;
+            case REQ_WRITE:      TratarWrite(&msg_buffer); break;
+            case REQ_CREATE_DIR: TratarCreateDir(&msg_buffer); break;
+            case REQ_REM_DIR:    TratarRemoveDir(&msg_buffer); break;
+            case REQ_LIST_DIR:   TratarListDir(&msg_buffer); break;
+            default: 
+                printf("SFSS: Tipo de mensagem desconhecido (%d)\n", msg_buffer.tipo);
                 break;
-            case REQ_WRITE:
-                TratarWrite(&msg_buffer);
-                break;
-            case REQ_CREATE_DIR:
-                TratarCreateDir(&msg_buffer);
-                break;
-            case REQ_REM_DIR:
-                TratarRemoveDir(&msg_buffer);
-                break;
-            case REQ_LIST_DIR:
-                TratarListDir(&msg_buffer);
-                break;
-            default:
-                printf("SFSS: Tipo de mensagem desconhecido: %d\n", msg_buffer.tipo);
-                continue; // Ignora
         }
 
-        // 7. Envia Resposta de volta para quem mandou
+        // Envia Resposta de Volta
         sendto(sockfd, &msg_buffer, sizeof(MensagemSFP), 
-               MSG_CONFIRM, (const struct sockaddr *)&cliaddr, len);
+               0, (const struct sockaddr *)&cliaddr, len);
+        
+        // Debug opcional: descomente se quiser ver cada envio
+        // printf("[DEBUG] Resposta enviada para A%d\n", msg_buffer.read_req.owner);
     }
-
     return 0;
 }
