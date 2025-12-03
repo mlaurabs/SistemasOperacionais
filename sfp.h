@@ -5,7 +5,7 @@
 #include <sys/types.h>
 
 // --- Configurações do Protocolo ---
-#define PORTA_SERVIDOR 9876
+#define PORTA_SERVIDOR 9881
 #define TAM_BLOCO 16             // [cite: 116] Leitura/Escrita sempre em blocos de 16 bytes
 #define MAX_PATH 256             // Tamanho seguro para nomes de arquivos
 #define MAX_DIR_ENTRIES 40       // [cite: 124] No máximo 40 nomes
