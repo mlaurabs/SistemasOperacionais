@@ -13,14 +13,13 @@
 
 #define ROOT_DIR "SFSS-root-dir"
 
-// Função auxiliar para montar o caminho do arquivo
+// funcao auxiliar para montar o caminho do arquivo
 void ConstruirCaminho(char *buffer, size_t tam, const char *caminho_req) {
     snprintf(buffer, tam, "%s%s", ROOT_DIR, caminho_req);
 }
 
-// ---------------------------------------------------------------------------
-// 1. TRATAR LEITURA (READ)
-// ---------------------------------------------------------------------------
+
+// READ
 void TratarRead(MensagemSFP *msg) {
     int req_owner = msg->read_req.owner;
     int req_offset = msg->read_req.offset;
@@ -36,13 +35,13 @@ void TratarRead(MensagemSFP *msg) {
     FILE *f = fopen(caminho_real, "rb");
     if (!f) {
         printf("SFSS: Erro leitura '%s': %s\n", caminho_real, strerror(errno));
-        msg->read_rep.offset = -1; // Erro: Arquivo não existe
+        msg->read_rep.offset = -1; // erro: Arquivo não existe
         return; 
     }
 
     if (fseek(f, req_offset, SEEK_SET) != 0) {
         printf("SFSS: Erro seek '%s': %s\n", caminho_real, strerror(errno));
-        msg->read_rep.offset = -2; // Erro: Offset inválido
+        msg->read_rep.offset = -2; // erro: offset inválido
         fclose(f);
         return;
     }
@@ -55,9 +54,7 @@ void TratarRead(MensagemSFP *msg) {
     printf("SFSS: Read OK (A%d) '%s' Off=%d\n", req_owner, req_path, req_offset);
 }
 
-// ---------------------------------------------------------------------------
-// 2. TRATAR ESCRITA (WRITE)
-// ---------------------------------------------------------------------------
+// WRITE
 void TratarWrite(MensagemSFP *msg) {
     int req_owner = msg->write_req.owner;
     int req_offset = msg->write_req.offset;
@@ -104,9 +101,7 @@ void TratarWrite(MensagemSFP *msg) {
     msg->write_rep.offset = req_offset; 
 }
 
-// ---------------------------------------------------------------------------
-// 3. TRATAR CRIAR DIRETÓRIO (DC)
-// ---------------------------------------------------------------------------
+// cria dir
 void TratarCreateDir(MensagemSFP *msg) {
     int req_owner = msg->create_dir_req.owner;
     char req_path[MAX_PATH];
@@ -135,9 +130,7 @@ void TratarCreateDir(MensagemSFP *msg) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 4. TRATAR REMOVER (DR)
-// ---------------------------------------------------------------------------
+// remove diretório
 void TratarRemoveDir(MensagemSFP *msg) {
     int req_owner = msg->rem_dir_req.owner;
     char req_path[MAX_PATH];
@@ -160,16 +153,14 @@ void TratarRemoveDir(MensagemSFP *msg) {
         strcpy(msg->rem_dir_rep.path, req_path);
         msg->rem_dir_rep.len_path = strlen(msg->rem_dir_rep.path);
     } else {
-        // Se falhar (ex: diretorio nao vazio ou nao existe), retorna erro
-        // Mas não vamos travar o servidor, apenas notificar.
+        // se falhar (ex: diretorio nao vazio ou nao existe), retorna erro
+        // mas não vamos travar o servidor, apenas notificar.
         // perror("SFSS remove error"); 
         msg->rem_dir_rep.len_path = -1;
     }
 }
 
-// ---------------------------------------------------------------------------
-// 5. TRATAR LISTAR DIRETÓRIO (DL)
-// ---------------------------------------------------------------------------
+// listar diretório
 void TratarListDir(MensagemSFP *msg) {
     int req_owner = msg->list_dir_req.owner;
     char req_path[MAX_PATH];
@@ -215,30 +206,26 @@ void TratarListDir(MensagemSFP *msg) {
         closedir(d);
         printf("SFSS: ListDir OK (A%d) '%s' -> %d itens\n", req_owner, req_path, idx);
     } else {
-        // Se erro ao abrir dir, retorna código negativo
+        // se erro ao abrir dir, retorna código negativo
         msg->list_dir_rep.nrnames = -1; 
     }
 }
 
-// ---------------------------------------------------------------------------
-// MAIN
-// ---------------------------------------------------------------------------
 int main() {
     int sockfd;
     struct sockaddr_in servaddr, cliaddr;
     MensagemSFP msg_buffer;
     
-    // Cria Socket
+    // cria o socket
     if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    // --- CORREÇÃO: Permite reuso rápido da porta ---
     int opt = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Configura Endereço do Servidor
+    // configura endereço do servidor
     memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
@@ -250,7 +237,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // Cria diretórios iniciais se não existirem
+    // cria diretórios iniciais se não existirem
     if (mkdir(ROOT_DIR, 0700) == 0) {
         printf(">>> Diretório raiz criado.\n");
     }
@@ -261,23 +248,22 @@ int main() {
         mkdir(home_path, 0700);
     }
 
-    printf(">>> SFSS rodando na porta %d (Fix: SO_REUSEADDR + No WaitAll)\n", PORTA_SERVIDOR);
+    printf(">>> SFSS rodando na porta %d\n", PORTA_SERVIDOR);
 
     while (1) {
         socklen_t len = sizeof(cliaddr);
         
-        // --- FIX CRÍTICO: Removido MSG_WAITALL (use 0) ---
-        // Isso impede que o servidor fique esperando encher o buffer se o pacote fragmentar
+        // impede que o servidor fique esperando encher o buffer se o pacote fragmentar
         ssize_t n = recvfrom(sockfd, &msg_buffer, sizeof(MensagemSFP), 
                              0, (struct sockaddr *)&cliaddr, &len);
         
         if (n < 0) {
-            // Ignora erros temporários
+            // ignora erros temporários
             if (errno != EAGAIN && errno != EWOULDBLOCK) perror("SFSS recv error");
             continue;
         }
 
-        // Processa a mensagem
+        // processa a mensagem
         switch (msg_buffer.tipo) {
             case REQ_READ:       TratarRead(&msg_buffer); break;
             case REQ_WRITE:      TratarWrite(&msg_buffer); break;
@@ -289,12 +275,9 @@ int main() {
                 break;
         }
 
-        // Envia Resposta de Volta
+        // envia resposta de volta
         sendto(sockfd, &msg_buffer, sizeof(MensagemSFP), 
                0, (const struct sockaddr *)&cliaddr, len);
-        
-        // Debug opcional: descomente se quiser ver cada envio
-        // printf("[DEBUG] Resposta enviada para A%d\n", msg_buffer.read_req.owner);
     }
     return 0;
 }
