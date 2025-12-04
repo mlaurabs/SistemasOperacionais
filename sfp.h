@@ -1,17 +1,16 @@
 #ifndef SFP_H
 #define SFP_H
 
-// Bibliotecas necessárias para os tipos (int, char, etc)
 #include <sys/types.h>
 
-// --- Configurações do Protocolo ---
+// config do protocolo
 #define PORTA_SERVIDOR 9881
-#define TAM_BLOCO 16             // [cite: 116] Leitura/Escrita sempre em blocos de 16 bytes
-#define MAX_PATH 256             // Tamanho seguro para nomes de arquivos
-#define MAX_DIR_ENTRIES 40       // [cite: 124] No máximo 40 nomes
-#define TAM_LIST_BUFFER 2048     // Espaço para os nomes do listDir
+#define TAM_BLOCO 16             // leitura/escrita sempre em blocos de 16 bytes
+#define MAX_PATH 256             
+#define MAX_DIR_ENTRIES 40       
+#define TAM_LIST_BUFFER 2048     
 
-// Códigos de Operação (para o switch/case)
+// códigos de operação 
 typedef enum {
     REQ_READ, 
     REQ_WRITE, 
@@ -26,25 +25,24 @@ typedef enum {
     REP_LIST_DIR
 } TipoMsg;
 
-// Estrutura auxiliar para o ListDir [cite: 227]
+// estrutura auxiliar para o ListDir
 typedef struct {
     int inicio;
     int fim;
     int eh_arquivo; // 0 = diretório, 1 = arquivo
 } EntryPos;
 
-// ============================================================================
-// ESTRUTURAS DE MENSAGEM
-// ============================================================================
 
-// 1. LEITURA (READ) [cite: 205]
+// estruturas das mensagesn
+
+// READ
 typedef struct {
-    int tipo;               // TipoMsg
+    int tipo;              
     int owner;              // ID do processo (1..5)
     char path[MAX_PATH];
-    int len_path;           // strlen
-    char payload[TAM_BLOCO];// Vazio no pedido
-    int offset;             // Posição de leitura
+    int len_path;          
+    char payload[TAM_BLOCO];// vazio no pedido
+    int offset;             // posição de leitura
 } MsgReadReq;
 
 typedef struct {
@@ -52,17 +50,17 @@ typedef struct {
     int owner;
     char path[MAX_PATH];
     int len_path;
-    char payload[TAM_BLOCO]; // Dados lidos vêm aqui
-    int offset;              // Retorna o valor ou NEGATIVO se erro [cite: 206]
+    char payload[TAM_BLOCO]; // dados lidos vêm aqui
+    int offset;              // retorna o valor ou negativo se erro
 } MsgReadRep;
 
-// 2. ESCRITA (WRITE) [cite: 208]
+// WRITE
 typedef struct {
     int tipo;
     int owner;
     char path[MAX_PATH];
     int len_path;
-    char payload[TAM_BLOCO]; // Dados a escrever
+    char payload[TAM_BLOCO]; // dados pra escrever
     int offset;
 } MsgWriteReq;
 
@@ -71,11 +69,11 @@ typedef struct {
     int owner;
     char path[MAX_PATH];
     int len_path;
-    char payload[TAM_BLOCO]; // Vazio na resposta
-    int offset;              // Retorna o valor ou NEGATIVO se erro [cite: 210]
+    char payload[TAM_BLOCO]; // vazio na resposta
+    int offset;              // retorna o valor ou negativo se erro 
 } MsgWriteRep;
 
-// 3. CRIAÇÃO DE DIRETÓRIO (DC - Create) [cite: 219]
+// CREATE DIR
 typedef struct {
     int tipo;
     int owner;
@@ -88,28 +86,28 @@ typedef struct {
 typedef struct {
     int tipo;
     int owner;
-    char path[MAX_PATH];    // Novo path completo
-    int len_path;           // Tamanho da nova string ou negativo se erro
+    char path[MAX_PATH];    // novo path completo
+    int len_path;           // tamanho da nova string ou negativo se erro
 } MsgCreateDirRep;
 
-// 4. REMOÇÃO DE DIRETÓRIO (DR - Remove) [cite: 221]
+// REM DIR
 typedef struct {
     int tipo;
     int owner;
     char path[MAX_PATH];
     int len_path;
-    char dirname[MAX_PATH]; // Nome a remover
+    char dirname[MAX_PATH]; // nome a remover
     int len_dirname;
 } MsgRemDirReq;
 
 typedef struct {
     int tipo;
     int owner;
-    char path[MAX_PATH];    // Novo path sem o nome
-    int len_path;           // Tamanho ou negativo se erro
+    char path[MAX_PATH];    // novo path sem o nome
+    int len_path;           // tamanho ou negativo se erro
 } MsgRemDirRep;
 
-// 5. LISTAR DIRETÓRIO (DL - List) [cite: 226]
+// LIST DIR
 typedef struct {
     int tipo;
     int owner;
@@ -120,17 +118,15 @@ typedef struct {
 typedef struct {
     int tipo;
     int owner;
-    // "retorna os nomes... em um unico char array... e fstlstpositions" [cite: 230]
+    
     char allfilenames[TAM_LIST_BUFFER];     
     EntryPos fstlstpositions[MAX_DIR_ENTRIES]; 
-    int nrnames;                            // Quantidade de itens
+    int nrnames;                            // quantidade de itens
 } MsgListDirRep;
 
-// ============================================================================
-// UNION GENÉRICA (Facilita o envio via UDP)
-// ============================================================================
+// union para envio via UDP)
 typedef union {
-    int tipo; // Acesso rápido ao tipo da mensagem
+    int tipo;
     MsgReadReq      read_req;
     MsgReadRep      read_rep;
     MsgWriteReq     write_req;
@@ -143,4 +139,4 @@ typedef union {
     MsgListDirRep   list_dir_rep;
 } MensagemSFP;
 
-#endif // SFP_H
+#endif 
